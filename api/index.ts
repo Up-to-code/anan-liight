@@ -44,7 +44,7 @@ async function getAppContext(): Promise<AppContext> {
       process.env.FEATURE_LLIGHT_BACKGROUND_JOBS_ENABLED = "false";
     }
 
-    appContextPromise = import("../src/api/app.js")
+    appContextPromise = import("../dist/api/app.js")
       .then(async ({ createApp }) => createApp())
       .then(async (ctx) => {
         await ctx.app.ready();
