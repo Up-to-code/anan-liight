@@ -1,0 +1,52 @@
+{
+  "name": "anan-liight",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/api/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/api/server.js",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
+    "lint": "eslint src tests --max-warnings 0",
+    "db:bootstrap": "bun scripts/bootstrap-core-tables.ts",
+    "db:preflight:staging": "bun scripts/spacetime-preflight.ts --profile dev --env-file .env.local",
+    "db:preflight:prod": "bun scripts/spacetime-preflight.ts --profile prod --env-file .env.production.local",
+    "db:apply:staging": "bash scripts/apply-spacetimedb.sh --profile dev --env-file .env.local",
+    "db:apply:staging:dry": "bash scripts/apply-spacetimedb.sh --profile dev --env-file .env.local --dry-run",
+    "db:apply:prod:dry": "bash scripts/apply-spacetimedb.sh --profile prod --env-file .env.production.local --dry-run",
+    "webhook:verify:smoke": "bash scripts/webhook-verify-smoke.sh",
+    "env:sync:convex": "tsx scripts/sync-convex-env.ts --profile dev --write-template true",
+    "env:sync:convex:dev": "tsx scripts/sync-convex-env.ts --profile dev --write-template true",
+    "env:sync:convex:prod": "tsx scripts/sync-convex-env.ts --profile prod --write-template true",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:report": "GENERATE_REPORT=1 vitest run && node scripts/generate-html-report.mjs",
+    "test:whatsapp:full:dev": "bun scripts/run-whatsapp-agent-full-gate.ts --profile dev --live-scrape true",
+    "test:whatsapp:full:prod": "bun scripts/run-whatsapp-agent-full-gate.ts --profile prod --live-scrape true --skip-suite true",
+    "test:whatsapp:full": "npm run test:whatsapp:full:dev && npm run test:whatsapp:full:prod",
+    "test:whatsapp:report": "npm run test:whatsapp:full && bun scripts/generate-whatsapp-agent-full-report.ts",
+    "validate:report": "node scripts/run-full-validation-report.mjs",
+    "dev:local": "bash scripts/dev-local.sh --profile dev"
+  },
+  "dependencies": {
+    "@fastify/rate-limit": "^10.3.0",
+    "fastify": "^5.6.1",
+    "pino": "^9.11.0",
+    "undici": "^7.16.0",
+    "uuid": "^13.0.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.41.0",
+    "@typescript-eslint/parser": "^8.41.0",
+    "@vitest/ui": "^4.0.18",
+    "eslint": "^9.34.0",
+    "eslint-plugin-boundaries": "^5.0.1",
+    "eslint-plugin-import": "^2.32.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,54 @@
+services:
+  - type: web
+    name: anan-liight-api
+    runtime: node
+    plan: starter
+    rootDir: anan-liight
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /health/live
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_HOST
+        value: 0.0.0.0
+      - key: APP_PORT
+        value: 10000
+      - key: SPACETIMEDB_HTTP_URL
+        value: https://maincloud.spacetimedb.com
+      - key: SPACETIMEDB_WS_URL
+        value: wss://maincloud.spacetimedb.com
+      - key: SPACETIMEDB_DB_NAME
+        value: anan-liight-debjf
+      - key: FEATURE_LLIGHT_DUAL_RUN_WRITE_ENABLED
+        value: "false"
+      - key: FEATURE_LLIGHT_READ_CUTOVER_ENABLED
+        value: "false"
+      - key: FEATURE_LLIGHT_WA_WEBHOOK_ENABLED
+        value: "true"
+      - key: OPENROUTER_BLOCK_FREE_MODELS
+        value: "true"
+      - key: OPENROUTER_MODEL_CHAIN
+        value: google/gemini-2.5-flash,openai/gpt-4o
+      - key: OPENROUTER_MODEL_ALLOWLIST
+        value: google/gemini-2.5-flash,openai/gpt-4o
+      - key: OPENROUTER_PRIMARY_MODEL
+        value: google/gemini-2.5-flash
+      - key: OPENROUTER_FALLBACK_MODEL
+        value: openai/gpt-4o
+      - key: OPENROUTER_F1_MODEL
+        value: openai/gpt-4o
+      - key: WHATSAPP_VERIFY_TOKEN
+        generateValue: true
+      - key: SPACETIMEDB_AUTH_TOKEN
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: SESSION_ENCRYPTION_KEY
+        sync: false

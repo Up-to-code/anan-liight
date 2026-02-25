@@ -1,0 +1,6 @@
+{
+  "dev": {
+    "run": "bash scripts/dev-local.sh --profile dev --env-file .env.local"
+  },
+  "server": "maincloud"
+}
