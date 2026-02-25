@@ -20,6 +20,7 @@ import { runCampaignSchedulerTick } from "@modules/whatsapp/scheduler/service";
 import type { CircuitStatePort } from "@lib/openrouter/circuit-state";
 import { TABLE_NAMES } from "@shared/constants";
 import { buildInstructionEnvelope } from "@agents/anan/runtime/instruction-builder";
+import { ensureRequiredTables, type TableProvisioningReport } from "@modules/internal/table-provisioning";
 
 export interface RuntimeContainer {
   env: AppEnv;
@@ -30,6 +31,8 @@ export interface RuntimeContainer {
   workflowEngine: WorkflowEngine;
   sessionStore: SessionStore;
   replayWorker: StepReplayWorker;
+  getTableProvisioningReport(): TableProvisioningReport;
+  getBuildVersion(): string;
   generateAssistantText(prompt: string): Promise<string>;
 }
 
@@ -40,6 +43,31 @@ export interface RuntimeContainer {
 export function createRuntime(): RuntimeContainer {
   const env = loadEnv();
   const store = new SpacetimeHttpStore(env);
+  const buildVersion = process.env["VERCEL_GIT_COMMIT_SHA"] ?? process.env["GIT_COMMIT_SHA"] ?? "local";
+  let tableProvisioningReport: TableProvisioningReport = {
+    state: env.NODE_ENV === "test" ? "skipped" : "pending",
+    checkedAt: Date.now(),
+    created: [],
+    existing: [],
+    failed: []
+  };
+
+  if (env.NODE_ENV !== "test") {
+    void ensureRequiredTables(env)
+      .then((report) => {
+        tableProvisioningReport = report;
+      })
+      .catch((error) => {
+        tableProvisioningReport = {
+          state: "degraded",
+          checkedAt: Date.now(),
+          created: [],
+          existing: [],
+          failed: [{ table: "startup", error: error instanceof Error ? error.message : "unknown error" }]
+        };
+      });
+  }
+
   const backgroundJobsEnabled = env.FEATURE_LLIGHT_BACKGROUND_JOBS_ENABLED && env.NODE_ENV !== "test";
 
   const messageBus = new AgentMessageBus(new MessageBusAdapter(store));
@@ -161,6 +189,8 @@ export function createRuntime(): RuntimeContainer {
     workflowEngine,
     sessionStore: new SessionStore(store, env.SESSION_ENCRYPTION_KEY),
     replayWorker,
+    getTableProvisioningReport: () => tableProvisioningReport,
+    getBuildVersion: () => buildVersion,
     async generateAssistantText(prompt: string): Promise<string> {
       const traceId = randomUUID();
       const instruction = buildInstructionEnvelope({ channel: "web" });

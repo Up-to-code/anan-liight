@@ -1,7 +1,19 @@
 export interface FetchOptions {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PATCH";
   body?: unknown;
   csrf?: string;
+}
+
+export class ApiError extends Error {
+  public readonly status: number;
+  public readonly payload?: unknown;
+
+  public constructor(message: string, status: number, payload?: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
 }
 
 export async function fetchJson<T>(url: string, options: FetchOptions = {}): Promise<T> {
@@ -18,7 +30,7 @@ export async function fetchJson<T>(url: string, options: FetchOptions = {}): Pro
 
   const data = (await response.json()) as T & { error?: string; message?: string };
   if (!response.ok) {
-    throw new Error(data.error ?? data.message ?? `Request failed: ${response.status}`);
+    throw new ApiError(data.error ?? data.message ?? `Request failed: ${response.status}`, response.status, data);
   }
 
   return data;

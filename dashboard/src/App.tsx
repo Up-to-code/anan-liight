@@ -13,6 +13,11 @@ import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { CircuitBreakersPage } from "./pages/CircuitBreakersPage";
 import { FeatureFlagsPage } from "./pages/FeatureFlagsPage";
 import { ActionsPage } from "./pages/ActionsPage";
+import { SearchPage } from "./pages/SearchPage";
+import { UsersPage } from "./pages/UsersPage";
+import { PartnersPage } from "./pages/PartnersPage";
+import { PropertiesPage } from "./pages/PropertiesPage";
+import { NotificationsPage } from "./pages/NotificationsPage";
 
 export function App() {
   const [csrfToken, setCsrfToken] = useState("");
@@ -41,6 +46,9 @@ export function App() {
     <DashboardContext.Provider value={{ csrfToken }}>
       <Routes>
         <Route path="/" element={<OverviewPage />} />
+        <Route path="/search" element={<SearchPage />} />
+        <Route path="/users" element={<UsersPage />} />
+        <Route path="/users/:userId" element={<UsersPage />} />
         <Route path="/whatsapp/webhooks" element={<WhatsAppWebhooksPage />} />
         <Route path="/whatsapp/templates" element={<WhatsAppTemplatesPage />} />
         <Route path="/whatsapp/campaigns" element={<WhatsAppCampaignsPage />} />
@@ -51,6 +59,9 @@ export function App() {
         <Route path="/ops/circuit-breakers" element={<CircuitBreakersPage />} />
         <Route path="/ops/feature-flags" element={<FeatureFlagsPage />} />
         <Route path="/ops/actions" element={<ActionsPage />} />
+        <Route path="/business/partners" element={<PartnersPage />} />
+        <Route path="/business/properties" element={<PropertiesPage />} />
+        <Route path="/business/notifications" element={<NotificationsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </DashboardContext.Provider>

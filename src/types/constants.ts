@@ -14,7 +14,8 @@ export const ROUTE_PATHS = {
   WHATSAPP_PERFORMANCE: "/api/whatsapp/performance",
   WHATSAPP_FEEDBACK: "/api/whatsapp/feedback",
   HEALTH_LIVE: "/health/live",
-  HEALTH_READY: "/health/ready"
+  HEALTH_READY: "/health/ready",
+  HEALTH_VERSION: "/health/version"
 } as const;
 
 export const TABLE_NAMES = {

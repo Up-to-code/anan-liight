@@ -71,6 +71,79 @@ interface DeadLetterRow {
   updatedAt: number;
 }
 
+interface UserProfileRow {
+  id: string;
+  version: number;
+  userId: string;
+  phoneNumber?: string;
+  name?: string;
+  locale?: string;
+  status?: string;
+  metadataJson?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface UserRoleRow {
+  id: string;
+  version: number;
+  roleAssignmentId: string;
+  userId: string;
+  role: string;
+  active: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface SessionTokenRow {
+  id: string;
+  version: number;
+  sessionId: string;
+  userId: string;
+  expiresAt: number;
+  revoked: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface PartnerRow {
+  id: string;
+  version: number;
+  partnerId: string;
+  name: string;
+  apiKeyHash?: string;
+  isActive?: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface PropertyRow {
+  id: string;
+  version: number;
+  propertyId: string;
+  partnerId?: string;
+  title?: string;
+  address?: string;
+  description?: string;
+  price?: number;
+  beds?: number;
+  baths?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface NotificationRow {
+  id: string;
+  version: number;
+  title: string;
+  message: string;
+  audience?: string;
+  priority?: string;
+  status?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 async function safeQueryMany<T extends object>(
   runtime: RuntimeContainer,
   table: string,
@@ -132,6 +205,25 @@ function buildPage<T extends { createdAt?: number; updatedAt?: number }>(
     totalApprox: rows.length,
     ...(error ? { error } : {})
   };
+}
+
+function getField(row: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value === null || typeof value === "undefined") continue;
+    return String(value);
+  }
+  return "";
+}
+
+function getNumberField(row: Record<string, unknown>, ...keys: string[]): number {
+  const value = getField(row, ...keys);
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function includesText(value: string, query: string): boolean {
+  return value.toLowerCase().includes(query.toLowerCase());
 }
 
 async function writeAdminAudit(runtime: RuntimeContainer, request: FastifyRequest, input: {
@@ -283,12 +375,673 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
     }));
 
     return reply.code(200).send({
+      version: runtime.getBuildVersion(),
       storeMode: runtime.env.SPACETIME_STORE_MODE,
       dbName: runtime.env.SPACETIMEDB_DB_NAME,
       endpoint: runtime.env.SPACETIMEDB_HTTP_URL,
       authTokenPresent: runtime.env.SPACETIMEDB_AUTH_TOKEN?.trim().length ? true : false,
-      checks
+      checks,
+      tableProvisioning: runtime.getTableProvisioningReport()
     });
+  });
+
+  app.get("/api/admin/search", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const query = request.query as CursorQuery & { q?: string; scope?: string };
+    const search = (query.q ?? "").trim();
+    const scope = (query.scope ?? "").trim().toLowerCase();
+    const allScopes = new Set(
+      (scope.length > 0 ? scope.split(",") : [
+        "users",
+        "campaigns",
+        "templates",
+        "api_logs",
+        "webhook_logs",
+        "dead_letters",
+        "workflows",
+        "flags",
+        "audit",
+        "partners",
+        "properties",
+        "notifications"
+      ]).map((item) => item.trim()).filter(Boolean)
+    );
+
+    const matches = (value: string): boolean => (search.length === 0 ? true : includesText(value, search));
+    const rows: Array<{ scope: string; id: string; title: string; subtitle: string; createdAt: number; meta: Record<string, unknown> }> = [];
+
+    const pushRow = (row: { scope: string; id: string; title: string; subtitle: string; createdAt: number; meta: Record<string, unknown> }) => {
+      rows.push(row);
+    };
+
+    if (allScopes.has("users")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.USER_PROFILES, [], 300);
+      for (const row of result.rows) {
+        const userId = getField(row, "userId", "user_id", "id");
+        const name = getField(row, "name");
+        const phone = getField(row, "phoneNumber", "phone_number");
+        if (!matches(`${userId} ${name} ${phone}`)) continue;
+        pushRow({
+          scope: "users",
+          id: userId || getField(row, "id"),
+          title: name || userId || "Unknown user",
+          subtitle: phone || userId,
+          createdAt: getNumberField(row, "createdAt", "created_at", "updatedAt", "updated_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("campaigns")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.WA_CAMPAIGNS, [], 300);
+      for (const row of result.rows) {
+        const campaignId = getField(row, "campaignId", "campaign_id");
+        const name = getField(row, "name");
+        const status = getField(row, "status");
+        if (!matches(`${campaignId} ${name} ${status}`)) continue;
+        pushRow({
+          scope: "campaigns",
+          id: campaignId || getField(row, "id"),
+          title: name || campaignId || "Campaign",
+          subtitle: status,
+          createdAt: getNumberField(row, "updatedAt", "updated_at", "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("templates")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.WA_TEMPLATES, [], 300);
+      for (const row of result.rows) {
+        const templateId = getField(row, "templateId", "template_id");
+        const name = getField(row, "name");
+        const status = getField(row, "status");
+        if (!matches(`${templateId} ${name} ${status}`)) continue;
+        pushRow({
+          scope: "templates",
+          id: templateId || getField(row, "id"),
+          title: name || templateId || "Template",
+          subtitle: status,
+          createdAt: getNumberField(row, "updatedAt", "updated_at", "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("api_logs")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.API_EVENT_LOG, [], 300);
+      for (const row of result.rows) {
+        const route = getField(row, "route");
+        const method = getField(row, "method");
+        const status = getField(row, "status");
+        if (!matches(`${route} ${method} ${status}`)) continue;
+        pushRow({
+          scope: "api_logs",
+          id: getField(row, "eventId", "event_id", "requestId", "request_id", "id"),
+          title: `${method || "METHOD"} ${route || "/"}`,
+          subtitle: `status=${status || "-"}`,
+          createdAt: getNumberField(row, "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("webhook_logs")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.WEBHOOK_EVENT_LOG, [], 300);
+      for (const row of result.rows) {
+        const eventType = getField(row, "eventType", "event_type");
+        const status = getField(row, "status");
+        const messageId = getField(row, "messageId", "message_id");
+        if (!matches(`${eventType} ${status} ${messageId}`)) continue;
+        pushRow({
+          scope: "webhook_logs",
+          id: getField(row, "eventId", "event_id", "id"),
+          title: eventType || "Webhook event",
+          subtitle: `${status || "-"} ${messageId}`,
+          createdAt: getNumberField(row, "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("dead_letters")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.DEAD_LETTERS, [], 300);
+      for (const row of result.rows) {
+        const scopeValue = getField(row, "scope");
+        const operation = getField(row, "operation");
+        const deadLetterId = getField(row, "deadLetterId", "dead_letter_id");
+        if (!matches(`${scopeValue} ${operation} ${deadLetterId}`)) continue;
+        pushRow({
+          scope: "dead_letters",
+          id: deadLetterId || getField(row, "id"),
+          title: `${scopeValue || "scope"}:${operation || "operation"}`,
+          subtitle: deadLetterId,
+          createdAt: getNumberField(row, "updatedAt", "updated_at", "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("workflows")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.WORKFLOW_STEP_EVENTS, [], 300);
+      for (const row of result.rows) {
+        const runId = getField(row, "workflowRunId", "workflow_run_id");
+        const stepId = getField(row, "stepId", "step_id");
+        const state = getField(row, "state");
+        if (!matches(`${runId} ${stepId} ${state}`)) continue;
+        pushRow({
+          scope: "workflows",
+          id: getField(row, "eventId", "event_id", "id"),
+          title: `${runId || "run"} / ${stepId || "step"}`,
+          subtitle: state || "-",
+          createdAt: getNumberField(row, "updatedAt", "updated_at", "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("flags")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.FEATURE_FLAGS, [], 300);
+      for (const row of result.rows) {
+        const key = getField(row, "flagKey", "flag_key");
+        const source = getField(row, "source");
+        const enabled = getField(row, "enabled");
+        if (!matches(`${key} ${source} ${enabled}`)) continue;
+        pushRow({
+          scope: "flags",
+          id: key || getField(row, "id"),
+          title: key || "feature flag",
+          subtitle: `${enabled} via ${source}`,
+          createdAt: getNumberField(row, "updatedAt", "updated_at", "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("audit")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.ADMIN_ACTION_AUDIT, [], 300);
+      for (const row of result.rows) {
+        const action = getField(row, "actionType", "action_type");
+        const actor = getField(row, "actorUserId", "actor_user_id");
+        const target = getField(row, "targetId", "target_id");
+        if (!matches(`${action} ${actor} ${target}`)) continue;
+        pushRow({
+          scope: "audit",
+          id: getField(row, "actionId", "action_id", "id"),
+          title: action || "admin action",
+          subtitle: `${actor} -> ${target}`,
+          createdAt: getNumberField(row, "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("partners")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.PARTNERS, [], 300);
+      for (const row of result.rows) {
+        const partnerId = getField(row, "partnerId", "partner_id");
+        const name = getField(row, "name");
+        if (!matches(`${partnerId} ${name}`)) continue;
+        pushRow({
+          scope: "partners",
+          id: partnerId || getField(row, "id"),
+          title: name || partnerId || "Partner",
+          subtitle: partnerId,
+          createdAt: getNumberField(row, "updatedAt", "updated_at", "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("properties")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.PROPERTIES, [], 300);
+      for (const row of result.rows) {
+        const propertyId = getField(row, "propertyId", "property_id");
+        const title = getField(row, "title");
+        const address = getField(row, "address");
+        if (!matches(`${propertyId} ${title} ${address}`)) continue;
+        pushRow({
+          scope: "properties",
+          id: propertyId || getField(row, "id"),
+          title: title || propertyId || "Property",
+          subtitle: address,
+          createdAt: getNumberField(row, "updatedAt", "updated_at", "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    if (allScopes.has("notifications")) {
+      const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.NOTIFICATIONS, [], 300);
+      for (const row of result.rows) {
+        const title = getField(row, "title");
+        const audience = getField(row, "audience");
+        const status = getField(row, "status");
+        if (!matches(`${title} ${audience} ${status}`)) continue;
+        pushRow({
+          scope: "notifications",
+          id: getField(row, "id"),
+          title: title || "Notification",
+          subtitle: `${audience} / ${status}`,
+          createdAt: getNumberField(row, "updatedAt", "updated_at", "createdAt", "created_at"),
+          meta: row
+        });
+      }
+    }
+
+    return reply.code(200).send(buildPage(rows, query));
+  });
+
+  app.get("/api/admin/users", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const query = request.query as CursorQuery & { query?: string; role?: string; status?: string };
+    const search = (query.query ?? "").trim().toLowerCase();
+    const roleFilter = (query.role ?? "").trim().toLowerCase();
+    const statusFilter = (query.status ?? "").trim().toLowerCase();
+    const [profilesResult, rolesResult, sessionsResult] = await Promise.all([
+      safeQueryMany<UserProfileRow>(runtime, TABLE_NAMES.USER_PROFILES, [], 1000),
+      safeQueryMany<UserRoleRow>(runtime, TABLE_NAMES.USER_ROLES, [], 1000),
+      safeQueryMany<SessionTokenRow>(runtime, TABLE_NAMES.SESSION_TOKENS, [], 1000)
+    ]);
+
+    const rolesByUser = new Map<string, string[]>();
+    for (const roleRow of rolesResult.rows) {
+      const roles = rolesByUser.get(roleRow.userId) ?? [];
+      if (roleRow.active !== false) roles.push(roleRow.role);
+      rolesByUser.set(roleRow.userId, roles);
+    }
+
+    const sessionCountByUser = new Map<string, number>();
+    for (const session of sessionsResult.rows) {
+      if (session.revoked) continue;
+      sessionCountByUser.set(session.userId, (sessionCountByUser.get(session.userId) ?? 0) + 1);
+    }
+
+    const rows = profilesResult.rows
+      .map((profile) => {
+        const roles = rolesByUser.get(profile.userId) ?? ["user"];
+        return {
+          userId: profile.userId,
+          name: profile.name ?? "",
+          phoneNumber: profile.phoneNumber ?? "",
+          locale: profile.locale ?? "",
+          status: profile.status ?? "active",
+          roles,
+          activeSessions: sessionCountByUser.get(profile.userId) ?? 0,
+          createdAt: profile.createdAt,
+          updatedAt: profile.updatedAt
+        };
+      })
+      .filter((row) => {
+        if (search.length > 0) {
+          const haystack = `${row.userId} ${row.name} ${row.phoneNumber} ${row.locale}`.toLowerCase();
+          if (!haystack.includes(search)) return false;
+        }
+        if (roleFilter && !row.roles.map((role) => role.toLowerCase()).includes(roleFilter)) return false;
+        if (statusFilter && row.status.toLowerCase() !== statusFilter) return false;
+        return true;
+      });
+
+    const error = [profilesResult.error, rolesResult.error, sessionsResult.error].filter(Boolean).join(" | ");
+    return reply.code(200).send(buildPage(rows, query, error.length > 0 ? error : undefined));
+  });
+
+  app.get("/api/admin/users/:userId", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = decodeURIComponent((request.params as { userId?: string }).userId ?? "");
+    if (!userId) return reply.code(400).send({ error: "userId required" });
+
+    const [profilesResult, rolesResult, sessionsResult] = await Promise.all([
+      safeQueryMany<UserProfileRow>(runtime, TABLE_NAMES.USER_PROFILES, [], 1000),
+      safeQueryMany<UserRoleRow>(runtime, TABLE_NAMES.USER_ROLES, [], 1000),
+      safeQueryMany<SessionTokenRow>(runtime, TABLE_NAMES.SESSION_TOKENS, [], 1000)
+    ]);
+    const profile = profilesResult.rows.find((item) => item.userId === userId);
+    if (!profile) return reply.code(404).send({ error: "User not found" });
+
+    const roles = rolesResult.rows.filter((item) => item.userId === userId && item.active !== false).map((item) => item.role);
+    const sessions = sessionsResult.rows
+      .filter((item) => item.userId === userId)
+      .map((item) => ({
+        sessionId: item.sessionId,
+        expiresAt: item.expiresAt,
+        revoked: item.revoked,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt
+      }));
+
+    return reply.code(200).send({
+      userId: profile.userId,
+      name: profile.name ?? "",
+      phoneNumber: profile.phoneNumber ?? "",
+      locale: profile.locale ?? "",
+      status: profile.status ?? "active",
+      roles: roles.length > 0 ? roles : ["user"],
+      metadataJson: profile.metadataJson ?? "{}",
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt,
+      sessions
+    });
+  });
+
+  app.patch("/api/admin/users/:userId", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireCsrf(request, reply)) return;
+    const userId = decodeURIComponent((request.params as { userId?: string }).userId ?? "");
+    if (!userId) return reply.code(400).send({ error: "userId required" });
+
+    const body = (request.body ?? {}) as {
+      name?: string;
+      locale?: string;
+      phoneNumber?: string;
+      metadataJson?: string;
+      reason?: string;
+      confirmation?: string;
+    };
+    if (!requireDestructiveSafety(runtime, reply, body)) return;
+
+    const profile = (await runtime.store.queryMany<UserProfileRow>(TABLE_NAMES.USER_PROFILES, [], 1000)).find((item) => item.userId === userId);
+    if (!profile) return reply.code(404).send({ error: "User not found" });
+
+    const next: UserProfileRow = {
+      ...profile,
+      ...(typeof body.name === "string" ? { name: body.name } : {}),
+      ...(typeof body.locale === "string" ? { locale: body.locale } : {}),
+      ...(typeof body.phoneNumber === "string" ? { phoneNumber: body.phoneNumber } : {}),
+      ...(typeof body.metadataJson === "string" ? { metadataJson: body.metadataJson } : {}),
+      updatedAt: Date.now()
+    };
+    const ok = await runtime.store.updateVersioned(TABLE_NAMES.USER_PROFILES, profile.id, profile.version, next);
+    await writeAdminAudit(runtime, request, {
+      actionType: "user_update",
+      targetType: "user",
+      targetId: userId,
+      reason: body.reason ?? "",
+      confirmation: body.confirmation ?? "",
+      payload: { before: profile, after: next },
+      result: ok ? "success" : "failed"
+    });
+    if (!ok) return reply.code(409).send({ error: "Version conflict" });
+    return reply.code(200).send({ ok: true });
+  });
+
+  app.post("/api/admin/users/:userId/roles", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireCsrf(request, reply)) return;
+    const userId = decodeURIComponent((request.params as { userId?: string }).userId ?? "");
+    const body = (request.body ?? {}) as { role?: string; mode?: "grant" | "revoke"; reason?: string; confirmation?: string };
+    if (!userId || !body.role || !body.mode) return reply.code(400).send({ error: "userId, role and mode are required" });
+    if (!requireDestructiveSafety(runtime, reply, body)) return;
+
+    const roles = await runtime.store.queryMany<UserRoleRow>(TABLE_NAMES.USER_ROLES, [], 1000);
+    const existing = roles.find((item) => item.userId === userId && item.role === body.role);
+    const now = Date.now();
+    let ok = true;
+    if (!existing) {
+      await runtime.store.insert(TABLE_NAMES.USER_ROLES, {
+        id: randomUUID(),
+        roleAssignmentId: randomUUID(),
+        userId,
+        role: body.role,
+        active: body.mode === "grant",
+        createdAt: now,
+        updatedAt: now,
+        version: 1
+      });
+    } else {
+      ok = await runtime.store.updateVersioned(TABLE_NAMES.USER_ROLES, existing.id, existing.version, {
+        ...existing,
+        active: body.mode === "grant",
+        updatedAt: now
+      });
+    }
+
+    await writeAdminAudit(runtime, request, {
+      actionType: body.mode === "grant" ? "user_role_grant" : "user_role_revoke",
+      targetType: "user_role",
+      targetId: `${userId}:${body.role}`,
+      reason: body.reason ?? "",
+      confirmation: body.confirmation ?? "",
+      payload: { role: body.role, mode: body.mode },
+      result: ok ? "success" : "failed"
+    });
+    if (!ok) return reply.code(409).send({ error: "Version conflict" });
+    return reply.code(200).send({ ok: true });
+  });
+
+  app.post("/api/admin/users/:userId/disable", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireCsrf(request, reply)) return;
+    const userId = decodeURIComponent((request.params as { userId?: string }).userId ?? "");
+    const body = (request.body ?? {}) as { reason?: string; confirmation?: string };
+    if (!userId) return reply.code(400).send({ error: "userId required" });
+    if (!requireDestructiveSafety(runtime, reply, body)) return;
+
+    const profile = (await runtime.store.queryMany<UserProfileRow>(TABLE_NAMES.USER_PROFILES, [], 1000)).find((item) => item.userId === userId);
+    if (!profile) return reply.code(404).send({ error: "User not found" });
+
+    const ok = await runtime.store.updateVersioned(TABLE_NAMES.USER_PROFILES, profile.id, profile.version, {
+      ...profile,
+      status: "disabled",
+      updatedAt: Date.now()
+    });
+    await writeAdminAudit(runtime, request, {
+      actionType: "user_disable",
+      targetType: "user",
+      targetId: userId,
+      reason: body.reason ?? "",
+      confirmation: body.confirmation ?? "",
+      payload: { previousStatus: profile.status ?? "active", nextStatus: "disabled" },
+      result: ok ? "success" : "failed"
+    });
+    if (!ok) return reply.code(409).send({ error: "Version conflict" });
+    return reply.code(200).send({ ok: true });
+  });
+
+  app.post("/api/admin/users/:userId/enable", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireCsrf(request, reply)) return;
+    const userId = decodeURIComponent((request.params as { userId?: string }).userId ?? "");
+    const body = (request.body ?? {}) as { reason?: string; confirmation?: string };
+    if (!userId) return reply.code(400).send({ error: "userId required" });
+    if (!requireDestructiveSafety(runtime, reply, body)) return;
+
+    const profile = (await runtime.store.queryMany<UserProfileRow>(TABLE_NAMES.USER_PROFILES, [], 1000)).find((item) => item.userId === userId);
+    if (!profile) return reply.code(404).send({ error: "User not found" });
+
+    const ok = await runtime.store.updateVersioned(TABLE_NAMES.USER_PROFILES, profile.id, profile.version, {
+      ...profile,
+      status: "active",
+      updatedAt: Date.now()
+    });
+    await writeAdminAudit(runtime, request, {
+      actionType: "user_enable",
+      targetType: "user",
+      targetId: userId,
+      reason: body.reason ?? "",
+      confirmation: body.confirmation ?? "",
+      payload: { previousStatus: profile.status ?? "disabled", nextStatus: "active" },
+      result: ok ? "success" : "failed"
+    });
+    if (!ok) return reply.code(409).send({ error: "Version conflict" });
+    return reply.code(200).send({ ok: true });
+  });
+
+  app.get("/api/admin/users/:userId/sessions", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = decodeURIComponent((request.params as { userId?: string }).userId ?? "");
+    if (!userId) return reply.code(400).send({ error: "userId required" });
+    const sessions = (await runtime.store.queryMany<SessionTokenRow>(TABLE_NAMES.SESSION_TOKENS, [], 1000)).filter((item) => item.userId === userId);
+    return reply.code(200).send({
+      rows: sessions.map((item) => ({
+        sessionId: item.sessionId,
+        revoked: item.revoked,
+        expiresAt: item.expiresAt,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt
+      })),
+      nextCursor: null,
+      totalApprox: sessions.length
+    });
+  });
+
+  app.post("/api/admin/users/:userId/sessions/revoke-all", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireCsrf(request, reply)) return;
+    const userId = decodeURIComponent((request.params as { userId?: string }).userId ?? "");
+    const body = (request.body ?? {}) as { reason?: string; confirmation?: string };
+    if (!userId) return reply.code(400).send({ error: "userId required" });
+    if (!requireDestructiveSafety(runtime, reply, body)) return;
+
+    const sessions = (await runtime.store.queryMany<SessionTokenRow>(TABLE_NAMES.SESSION_TOKENS, [], 1000)).filter((item) => item.userId === userId && !item.revoked);
+    let revoked = 0;
+    for (const session of sessions) {
+      const ok = await runtime.store.updateVersioned(TABLE_NAMES.SESSION_TOKENS, session.id, session.version, {
+        ...session,
+        revoked: true,
+        updatedAt: Date.now()
+      });
+      if (ok) revoked += 1;
+    }
+
+    await writeAdminAudit(runtime, request, {
+      actionType: "user_sessions_revoke_all",
+      targetType: "user",
+      targetId: userId,
+      reason: body.reason ?? "",
+      confirmation: body.confirmation ?? "",
+      payload: { revoked },
+      result: "success"
+    });
+
+    return reply.code(200).send({ ok: true, revoked });
+  });
+
+  app.get("/api/admin/partners", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const query = request.query as CursorQuery & { query?: string };
+    const search = (query.query ?? "").trim().toLowerCase();
+    const result = await safeQueryMany<PartnerRow>(runtime, TABLE_NAMES.PARTNERS, [], 1000);
+    const rows = result.rows.filter((row) => {
+      if (!search) return true;
+      return includesText(`${row.partnerId} ${row.name}`, search);
+    });
+    return reply.code(200).send(buildPage(rows, query, result.error));
+  });
+
+  app.patch("/api/admin/partners/:partnerId", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireCsrf(request, reply)) return;
+    const partnerId = decodeURIComponent((request.params as { partnerId?: string }).partnerId ?? "");
+    const body = (request.body ?? {}) as { name?: string; isActive?: boolean; reason?: string; confirmation?: string };
+    if (!partnerId) return reply.code(400).send({ error: "partnerId required" });
+    if (!requireDestructiveSafety(runtime, reply, body)) return;
+
+    const row = (await runtime.store.queryMany<PartnerRow>(TABLE_NAMES.PARTNERS, [], 1000)).find((item) => item.partnerId === partnerId || item.id === partnerId);
+    if (!row) return reply.code(404).send({ error: "Partner not found" });
+    const next = {
+      ...row,
+      ...(typeof body.name === "string" ? { name: body.name } : {}),
+      ...(typeof body.isActive === "boolean" ? { isActive: body.isActive } : {}),
+      updatedAt: Date.now()
+    };
+    const ok = await runtime.store.updateVersioned(TABLE_NAMES.PARTNERS, row.id, row.version, next);
+    await writeAdminAudit(runtime, request, {
+      actionType: "partner_update",
+      targetType: "partner",
+      targetId: partnerId,
+      reason: body.reason ?? "",
+      confirmation: body.confirmation ?? "",
+      payload: { before: row, after: next },
+      result: ok ? "success" : "failed"
+    });
+    if (!ok) return reply.code(409).send({ error: "Version conflict" });
+    return reply.code(200).send({ ok: true });
+  });
+
+  app.get("/api/admin/properties", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const query = request.query as CursorQuery & { query?: string };
+    const search = (query.query ?? "").trim().toLowerCase();
+    const result = await safeQueryMany<PropertyRow>(runtime, TABLE_NAMES.PROPERTIES, [], 1000);
+    const rows = result.rows.filter((row) => {
+      if (!search) return true;
+      return includesText(`${row.propertyId} ${row.title ?? ""} ${row.address ?? ""}`, search);
+    });
+    return reply.code(200).send(buildPage(rows, query, result.error));
+  });
+
+  app.patch("/api/admin/properties/:propertyId", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireCsrf(request, reply)) return;
+    const propertyId = decodeURIComponent((request.params as { propertyId?: string }).propertyId ?? "");
+    const body = (request.body ?? {}) as {
+      title?: string;
+      address?: string;
+      description?: string;
+      price?: number;
+      beds?: number;
+      baths?: number;
+      reason?: string;
+      confirmation?: string;
+    };
+    if (!propertyId) return reply.code(400).send({ error: "propertyId required" });
+    if (!requireDestructiveSafety(runtime, reply, body)) return;
+
+    const row = (await runtime.store.queryMany<PropertyRow>(TABLE_NAMES.PROPERTIES, [], 1000)).find((item) => item.propertyId === propertyId || item.id === propertyId);
+    if (!row) return reply.code(404).send({ error: "Property not found" });
+    const next = {
+      ...row,
+      ...(typeof body.title === "string" ? { title: body.title } : {}),
+      ...(typeof body.address === "string" ? { address: body.address } : {}),
+      ...(typeof body.description === "string" ? { description: body.description } : {}),
+      ...(typeof body.price === "number" ? { price: body.price } : {}),
+      ...(typeof body.beds === "number" ? { beds: body.beds } : {}),
+      ...(typeof body.baths === "number" ? { baths: body.baths } : {}),
+      updatedAt: Date.now()
+    };
+    const ok = await runtime.store.updateVersioned(TABLE_NAMES.PROPERTIES, row.id, row.version, next);
+    await writeAdminAudit(runtime, request, {
+      actionType: "property_update",
+      targetType: "property",
+      targetId: propertyId,
+      reason: body.reason ?? "",
+      confirmation: body.confirmation ?? "",
+      payload: { before: row, after: next },
+      result: ok ? "success" : "failed"
+    });
+    if (!ok) return reply.code(409).send({ error: "Version conflict" });
+    return reply.code(200).send({ ok: true });
+  });
+
+  app.get("/api/admin/notifications", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const query = request.query as CursorQuery & { query?: string };
+    const search = (query.query ?? "").trim().toLowerCase();
+    const result = await safeQueryMany<NotificationRow>(runtime, TABLE_NAMES.NOTIFICATIONS, [], 1000);
+    const rows = result.rows.filter((row) => {
+      if (!search) return true;
+      return includesText(`${row.title} ${row.message} ${row.status ?? ""}`, search);
+    });
+    return reply.code(200).send(buildPage(rows, query, result.error));
+  });
+
+  app.patch("/api/admin/notifications/:id", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireCsrf(request, reply)) return;
+    const id = decodeURIComponent((request.params as { id?: string }).id ?? "");
+    const body = (request.body ?? {}) as { title?: string; message?: string; audience?: string; priority?: string; status?: string; reason?: string; confirmation?: string };
+    if (!id) return reply.code(400).send({ error: "id required" });
+    if (!requireDestructiveSafety(runtime, reply, body)) return;
+
+    const row = (await runtime.store.queryMany<NotificationRow>(TABLE_NAMES.NOTIFICATIONS, [], 1000)).find((item) => item.id === id);
+    if (!row) return reply.code(404).send({ error: "Notification not found" });
+    const next = {
+      ...row,
+      ...(typeof body.title === "string" ? { title: body.title } : {}),
+      ...(typeof body.message === "string" ? { message: body.message } : {}),
+      ...(typeof body.audience === "string" ? { audience: body.audience } : {}),
+      ...(typeof body.priority === "string" ? { priority: body.priority } : {}),
+      ...(typeof body.status === "string" ? { status: body.status } : {}),
+      updatedAt: Date.now()
+    };
+    const ok = await runtime.store.updateVersioned(TABLE_NAMES.NOTIFICATIONS, row.id, row.version, next);
+    await writeAdminAudit(runtime, request, {
+      actionType: "notification_update",
+      targetType: "notification",
+      targetId: id,
+      reason: body.reason ?? "",
+      confirmation: body.confirmation ?? "",
+      payload: { before: row, after: next },
+      result: ok ? "success" : "failed"
+    });
+    if (!ok) return reply.code(409).send({ error: "Version conflict" });
+    return reply.code(200).send({ ok: true });
   });
 
   app.get("/api/admin/logs/api", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {

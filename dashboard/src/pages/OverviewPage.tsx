@@ -11,7 +11,7 @@ import { SkeletonTable } from "../components/SkeletonTable";
 interface OverviewResponse {
   service: string;
   ready: boolean;
-  checks: { store: string; queue: string };
+  checks: { store: string; queue: string; tableProvisioning?: string };
   whatsapp: { total: number; sent: number; failed: number; avgLatencyMs: number };
   counts: { apiEvents: number; webhookEvents: number; deadLetters: number; workflowEvents: number; circuitBreakers: number; featureFlags: number };
   errors?: string[];
@@ -25,6 +25,7 @@ export function OverviewPage() {
     if (query.data && !query.data.ready) result.push("System readiness is degraded.");
     if ((query.data?.whatsapp.failed ?? 0) > 0) result.push("WhatsApp failures detected in recent window.");
     if ((query.data?.errors?.length ?? 0) > 0) result.push("Data store errors are present in admin APIs.");
+    if ((query.data?.checks.tableProvisioning ?? "ok") === "degraded") result.push("Table provisioning is degraded. Check /api/admin/diagnostics/store.");
     return result;
   }, [query.data]);
 
@@ -45,6 +46,7 @@ export function OverviewPage() {
           <div className="inline-actions">
             <div><strong>Store:</strong> <StatusPill value={query.data?.checks.store ?? "unknown"} /></div>
             <div><strong>Queue:</strong> <StatusPill value={query.data?.checks.queue ?? "unknown"} /></div>
+            <div><strong>Tables:</strong> <StatusPill value={query.data?.checks.tableProvisioning ?? "unknown"} /></div>
             <div><strong>API Events:</strong> {query.data?.counts.apiEvents ?? 0}</div>
             <div><strong>Webhook Events:</strong> {query.data?.counts.webhookEvents ?? 0}</div>
             <div><strong>Dead Letters:</strong> {query.data?.counts.deadLetters ?? 0}</div>

@@ -7,13 +7,20 @@ export async function registerHealthRoutes(app: FastifyInstance, runtime: Runtim
   app.get("/", async () => ({
     service: "anan-liight",
     status: "ok",
+    version: runtime.getBuildVersion(),
     health: {
       live: ROUTE_PATHS.HEALTH_LIVE,
-      ready: ROUTE_PATHS.HEALTH_READY
+      ready: ROUTE_PATHS.HEALTH_READY,
+      version: ROUTE_PATHS.HEALTH_VERSION
     }
   }));
 
   app.get(ROUTE_PATHS.HEALTH_LIVE, async () => getLiveness());
+  app.get(ROUTE_PATHS.HEALTH_VERSION, async () => ({
+    service: "anan-liight",
+    version: runtime.getBuildVersion(),
+    tableProvisioning: runtime.getTableProvisioningReport()
+  }));
 
   app.get(ROUTE_PATHS.HEALTH_READY, async (_request: FastifyRequest, reply: FastifyReply) => {
     const readiness = await getReadiness(runtime);

@@ -63,4 +63,38 @@ describe("admin routes", () => {
 
     expect(response.statusCode).toBe(403);
   });
+
+  test("returns diagnostics payload for admin", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/admin/diagnostics/store",
+      headers: { "x-admin-role": "admin" }
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { checks: unknown[]; tableProvisioning: { state: string } };
+    expect(Array.isArray(body.checks)).toBe(true);
+    expect(typeof body.tableProvisioning.state).toBe("string");
+  });
+
+  test("returns search and users list envelopes", async () => {
+    const searchResponse = await app.inject({
+      method: "GET",
+      url: "/api/admin/search?q=test&limit=10",
+      headers: { "x-admin-role": "admin" }
+    });
+    expect(searchResponse.statusCode).toBe(200);
+    const searchBody = searchResponse.json() as { rows: unknown[]; nextCursor: string | null };
+    expect(Array.isArray(searchBody.rows)).toBe(true);
+    expect(searchBody.nextCursor === null || typeof searchBody.nextCursor === "string").toBe(true);
+
+    const usersResponse = await app.inject({
+      method: "GET",
+      url: "/api/admin/users?limit=10",
+      headers: { "x-admin-role": "admin" }
+    });
+    expect(usersResponse.statusCode).toBe(200);
+    const usersBody = usersResponse.json() as { rows: unknown[]; totalApprox: number };
+    expect(Array.isArray(usersBody.rows)).toBe(true);
+    expect(typeof usersBody.totalApprox).toBe("number");
+  });
 });
