@@ -2,6 +2,7 @@ import { createHash, randomUUID, randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { requireAdmin } from "@api/middleware/auth";
 import { waCampaignCreateSchema, waCampaignRunSchema, waTemplateDraftSchema } from "@api/schema/whatsapp-platform";
+import { AppError } from "@lib/errors/app-error";
 import { getReadiness } from "@modules/queries/health-query";
 import type { RuntimeContainer } from "@modules/internal/runtime";
 import { TABLE_NAMES } from "@shared/constants";
@@ -80,6 +81,12 @@ async function safeQueryMany<T extends object>(
     const rows = await runtime.store.queryMany<T>(table, filters, limit);
     return { rows };
   } catch (error) {
+    if (error instanceof AppError) {
+      const detail = typeof error.payload === "object" && error.payload !== null && "detail" in error.payload
+        ? String((error.payload as Record<string, unknown>)["detail"] ?? "")
+        : "";
+      return { rows: [], error: detail ? `${error.message} | ${detail}` : error.message };
+    }
     return { rows: [], error: error instanceof Error ? error.message : "store_query_failed" };
   }
 }
@@ -244,6 +251,43 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
           : []),
         ...(readiness.ready ? [] : ["READINESS_DEGRADED"])
       ]
+    });
+  });
+
+  app.get("/api/admin/diagnostics/store", { preHandler: requireAdmin(runtime) }, async (_request: FastifyRequest, reply: FastifyReply) => {
+    const tablesToCheck = [
+      TABLE_NAMES.API_EVENT_LOG,
+      TABLE_NAMES.WEBHOOK_EVENT_LOG,
+      TABLE_NAMES.DEAD_LETTERS,
+      TABLE_NAMES.WORKFLOW_STEP_EVENTS,
+      TABLE_NAMES.CIRCUIT_BREAKER_STATE,
+      TABLE_NAMES.FEATURE_FLAGS,
+      TABLE_NAMES.WA_TEMPLATES,
+      TABLE_NAMES.WA_CAMPAIGNS,
+      TABLE_NAMES.ADMIN_ACTION_AUDIT
+    ];
+
+    const checks = await Promise.all(tablesToCheck.map(async (table) => {
+      try {
+        const rows = await runtime.store.queryMany<Record<string, unknown>>(table, [], 1);
+        return { table, ok: true, sampleRows: rows.length };
+      } catch (error) {
+        if (error instanceof AppError) {
+          const detail = typeof error.payload === "object" && error.payload !== null && "detail" in error.payload
+            ? String((error.payload as Record<string, unknown>)["detail"] ?? "")
+            : undefined;
+          return { table, ok: false, error: error.message, ...(detail ? { detail } : {}) };
+        }
+        return { table, ok: false, error: error instanceof Error ? error.message : "unknown_store_error" };
+      }
+    }));
+
+    return reply.code(200).send({
+      storeMode: runtime.env.SPACETIME_STORE_MODE,
+      dbName: runtime.env.SPACETIMEDB_DB_NAME,
+      endpoint: runtime.env.SPACETIMEDB_HTTP_URL,
+      authTokenPresent: runtime.env.SPACETIMEDB_AUTH_TOKEN?.trim().length ? true : false,
+      checks
     });
   });
 

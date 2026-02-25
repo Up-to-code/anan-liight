@@ -6,6 +6,7 @@ import { toSpacetimeTableName } from "@lib/spacetime/table-name";
 
 const execFileAsync = promisify(execFile);
 const TABLE_NAME_REGEX = /^[a-z][a-z0-9_]*$/;
+const COLUMN_NAME_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface QueryFilter {
   field: string;
@@ -49,6 +50,16 @@ function sqlEscape(value: string): string {
 
 function sqlLiteral(value: string): string {
   return `'${sqlEscape(value)}'`;
+}
+
+function assertColumnName(column: string): void {
+  if (COLUMN_NAME_REGEX.test(column)) return;
+  throw new AppError({
+    code: "VALIDATION_ERROR",
+    message: `Invalid column name: ${column}`,
+    payload: { reason: "Column names must be SQL identifiers" },
+    retryable: false
+  });
 }
 
 function stripWarnings(raw: string): string[] {
@@ -258,6 +269,11 @@ interface SqlQueryResult {
   total_duration_micros?: number;
 }
 
+interface ParsedSqlTable {
+  columns: string[];
+  rows: string[][];
+}
+
 function decodeSqlCell(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -271,20 +287,79 @@ function decodeSqlCell(value: unknown): string {
   return String(value);
 }
 
-function parseSqlRows(response: unknown): string[][] {
+function parseSqlTables(response: unknown): ParsedSqlTable[] {
   if (!Array.isArray(response)) return [];
-  const allRows: string[][] = [];
+  const tables: ParsedSqlTable[] = [];
   for (const entry of response as SqlQueryResult[]) {
+    const columns = (Array.isArray(entry.schema?.elements) ? entry.schema?.elements : [])
+      .map((element) => {
+        const nameValue = element?.name;
+        if (!nameValue || typeof nameValue !== "object") return "";
+        if ("some" in nameValue && typeof nameValue.some === "string") return nameValue.some;
+        return "";
+      })
+      .filter((name) => name.length > 0);
     const rows = Array.isArray(entry.rows) ? entry.rows : [];
+    const parsedRows: string[][] = [];
     for (const row of rows) {
       if (!Array.isArray(row)) continue;
-      allRows.push(row.map((cell) => decodeSqlCell(cell)));
+      parsedRows.push(row.map((cell) => decodeSqlCell(cell)));
+    }
+    tables.push({ columns, rows: parsedRows });
+  }
+  return tables;
+}
+
+function parseSqlRows(response: unknown): string[][] {
+  return parseSqlTables(response).flatMap((table) => table.rows);
+}
+
+function sqlCellToValue(value: string): string | number | boolean | null {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+$/.test(value)) {
+    const parsed = Number(value);
+    if (Number.isSafeInteger(parsed)) return parsed;
+  }
+  if (/^-?\d+\.\d+$/.test(value)) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return value;
+}
+
+function toSqlObjectRows(response: unknown): JsonRow[] {
+  const tables = parseSqlTables(response);
+  const objects: JsonRow[] = [];
+  for (const table of tables) {
+    const columns = table.columns;
+    for (const row of table.rows) {
+      const obj: JsonRow = {};
+      for (let index = 0; index < row.length; index += 1) {
+        const key = columns[index] ?? `col${index}`;
+        obj[key] = sqlCellToValue(row[index] ?? "");
+      }
+      objects.push(obj);
     }
   }
-  return allRows;
+  return objects;
+}
+
+function toSqlValue(value: unknown): string {
+  if (value === null || typeof value === "undefined") return "NULL";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "NULL";
+    return String(value);
+  }
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "string") return sqlLiteral(value);
+  return sqlLiteral(JSON.stringify(value));
 }
 
 class SpacetimeSqlHttpStore implements SpacetimeStore {
+  private readonly tableModeCache = new Map<string, "payload" | "columns">();
+
   public constructor(private readonly env: AppEnv) {}
 
   public async insert<T extends object>(table: string, row: T): Promise<void> {
@@ -300,15 +375,10 @@ class SpacetimeSqlHttpStore implements SpacetimeStore {
       });
     }
 
-    const payload = JSON.stringify(data);
-    const version = String(data["version"] ?? 1);
-    const createdAt = String(data["createdAt"] ?? Date.now());
-    const updatedAt = String(data["updatedAt"] ?? Date.now());
-
-    const sql =
-      `INSERT INTO ${sqlTable} (id, payload_json, version, created_at, updated_at) VALUES (` +
-      `${sqlLiteral(id)}, ${sqlLiteral(payload)}, ${sqlLiteral(version)}, ` +
-      `${sqlLiteral(createdAt)}, ${sqlLiteral(updatedAt)})`;
+    const mode = await this.detectTableMode(sqlTable);
+    const sql = mode === "payload"
+      ? this.buildPayloadInsertSql(sqlTable, data)
+      : this.buildColumnInsertSql(sqlTable, data);
     await this.runSql(sql);
   }
 
@@ -320,14 +390,23 @@ class SpacetimeSqlHttpStore implements SpacetimeStore {
   public async queryMany<T extends object>(table: string, filters: QueryFilter[], limit: number): Promise<T[]> {
     const sqlTable = toSqlTable(table);
     const fetchLimit = Math.max(limit * 5, 200);
-    const sql = `SELECT payload_json FROM ${sqlTable} LIMIT ${fetchLimit}`;
-    const rowData = parseSqlRows(await this.runSql(sql));
-    const payloadRows = rowData.map((row) => row[0] ?? "").filter((value) => value.length > 0);
-    const decoded = payloadRows
-      .map((payload) => JSON.parse(payload) as JsonRow)
+    const mode = await this.detectTableMode(sqlTable);
+    if (mode === "payload") {
+      const sql = `SELECT payload_json FROM ${sqlTable} LIMIT ${fetchLimit}`;
+      const rowData = parseSqlRows(await this.runSql(sql));
+      const payloadRows = rowData.map((row) => row[0] ?? "").filter((value) => value.length > 0);
+      const decoded = payloadRows
+        .map((payload) => JSON.parse(payload) as JsonRow)
+        .filter((row) => matchesFilters(row, filters))
+        .slice(0, limit);
+      return decoded.map((row) => row as T);
+    }
+
+    const sql = `SELECT * FROM ${sqlTable} LIMIT ${fetchLimit}`;
+    const rows = toSqlObjectRows(await this.runSql(sql))
       .filter((row) => matchesFilters(row, filters))
       .slice(0, limit);
-    return decoded.map((row) => row as T);
+    return rows.map((row) => row as T);
   }
 
   public async updateVersioned<T extends object>(
@@ -337,14 +416,11 @@ class SpacetimeSqlHttpStore implements SpacetimeStore {
     patch: Partial<T>
   ): Promise<boolean> {
     const sqlTable = toSqlTable(table);
-    const rows = parseSqlRows(
-      await this.runSql(`SELECT payload_json, version FROM ${sqlTable} WHERE id = ${sqlLiteral(id)} LIMIT 1`)
-    );
-    const row = rows[0];
-    if (!row || !row[0]) return false;
+    const mode = await this.detectTableMode(sqlTable);
+    const current = await this.queryOne<JsonRow>(table, [{ field: "id", op: "eq", value: id }]);
+    if (!current) return false;
 
-    const current = JSON.parse(row[0]) as JsonRow;
-    const version = Number(row[1] ?? current["version"] ?? 0);
+    const version = Number(current["version"] ?? 0);
     if (version !== expectedVersion) return false;
 
     const nextRow: JsonRow = {
@@ -354,14 +430,67 @@ class SpacetimeSqlHttpStore implements SpacetimeStore {
       updatedAt: Date.now()
     };
 
+    const sql = mode === "payload"
+      ? this.buildPayloadUpdateSql(sqlTable, id, expectedVersion, nextRow)
+      : this.buildColumnUpdateSql(sqlTable, id, expectedVersion, nextRow);
+    await this.runSql(sql);
+    return true;
+  }
+
+  private buildPayloadInsertSql(sqlTable: string, data: JsonRow): string {
+    const payload = JSON.stringify(data);
+    const version = String(data["version"] ?? 1);
+    const createdAt = String(data["createdAt"] ?? Date.now());
+    const updatedAt = String(data["updatedAt"] ?? Date.now());
+    return (
+      `INSERT INTO ${sqlTable} (id, payload_json, version, created_at, updated_at) VALUES (` +
+      `${sqlLiteral(String(data["id"]))}, ${sqlLiteral(payload)}, ${sqlLiteral(version)}, ` +
+      `${sqlLiteral(createdAt)}, ${sqlLiteral(updatedAt)})`
+    );
+  }
+
+  private buildColumnInsertSql(sqlTable: string, data: JsonRow): string {
+    const keys = Object.keys(data);
+    for (const key of keys) assertColumnName(key);
+    const columns = keys.join(", ");
+    const values = keys.map((key) => toSqlValue(data[key])).join(", ");
+    return `INSERT INTO ${sqlTable} (${columns}) VALUES (${values})`;
+  }
+
+  private buildPayloadUpdateSql(sqlTable: string, id: string, expectedVersion: number, nextRow: JsonRow): string {
     const nextPayload = JSON.stringify(nextRow);
-    const sql =
+    return (
       `UPDATE ${sqlTable} SET payload_json = ${sqlLiteral(nextPayload)}, ` +
       `version = ${sqlLiteral(String(expectedVersion + 1))}, ` +
       `updated_at = ${sqlLiteral(String(Date.now()))} ` +
-      `WHERE id = ${sqlLiteral(id)} AND version = ${sqlLiteral(String(expectedVersion))}`;
-    await this.runSql(sql);
-    return true;
+      `WHERE id = ${sqlLiteral(id)} AND version = ${sqlLiteral(String(expectedVersion))}`
+    );
+  }
+
+  private buildColumnUpdateSql(sqlTable: string, id: string, expectedVersion: number, nextRow: JsonRow): string {
+    const assignments = Object.entries(nextRow)
+      .filter(([key]) => key !== "id")
+      .map(([key, value]) => {
+        assertColumnName(key);
+        return `${key} = ${toSqlValue(value)}`;
+      })
+      .join(", ");
+    return (
+      `UPDATE ${sqlTable} SET ${assignments} ` +
+      `WHERE id = ${sqlLiteral(id)} AND version = ${String(expectedVersion)}`
+    );
+  }
+
+  private async detectTableMode(sqlTable: string): Promise<"payload" | "columns"> {
+    const cached = this.tableModeCache.get(sqlTable);
+    if (cached) return cached;
+
+    const response = await this.runSql(`SELECT * FROM ${sqlTable} LIMIT 1`);
+    const tables = parseSqlTables(response);
+    const columns = tables[0]?.columns ?? [];
+    const mode: "payload" | "columns" = columns.includes("payload_json") ? "payload" : "columns";
+    this.tableModeCache.set(sqlTable, mode);
+    return mode;
   }
 
   private async runSql(query: string): Promise<unknown> {
