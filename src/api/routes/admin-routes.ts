@@ -60,6 +60,20 @@ interface DeadLetterRow {
   updatedAt: number;
 }
 
+async function safeQueryMany<T extends object>(
+  runtime: RuntimeContainer,
+  table: string,
+  filters: Array<{ field: string; op: "eq"; value: string | number | boolean }> = [],
+  limit = 1000
+): Promise<{ rows: T[]; error?: string }> {
+  try {
+    const rows = await runtime.store.queryMany<T>(table, filters, limit);
+    return { rows };
+  } catch (error) {
+    return { rows: [], error: error instanceof Error ? error.message : "store_query_failed" };
+  }
+}
+
 function parseCookies(header: string | undefined): Record<string, string> {
   if (!header) return {};
   return header.split(";").reduce<Record<string, string>>((acc, pair) => {
@@ -158,14 +172,19 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
 
   app.get("/api/admin/overview", { preHandler: requireAdmin(runtime) }, async (_request: FastifyRequest, reply: FastifyReply) => {
     const readiness = await getReadiness(runtime);
-    const waPerformance = await getWhatsAppPerformance(runtime, 500);
+    const waPerformance = await getWhatsAppPerformance(runtime, 500).catch(() => ({
+      total: 0,
+      sent: 0,
+      failed: 0,
+      avgLatencyMs: 0
+    }));
     const [apiEvents, webhookEvents, deadLetters, workflows, circuits, flags] = await Promise.all([
-      runtime.store.queryMany(TABLE_NAMES.API_EVENT_LOG, [], 500),
-      runtime.store.queryMany(TABLE_NAMES.WEBHOOK_EVENT_LOG, [], 500),
-      runtime.store.queryMany(TABLE_NAMES.DEAD_LETTERS, [], 500),
-      runtime.store.queryMany(TABLE_NAMES.WORKFLOW_STEP_EVENTS, [], 500),
-      runtime.store.queryMany(TABLE_NAMES.CIRCUIT_BREAKER_STATE, [], 500),
-      runtime.store.queryMany(TABLE_NAMES.FEATURE_FLAGS, [], 500)
+      safeQueryMany(runtime, TABLE_NAMES.API_EVENT_LOG, [], 500),
+      safeQueryMany(runtime, TABLE_NAMES.WEBHOOK_EVENT_LOG, [], 500),
+      safeQueryMany(runtime, TABLE_NAMES.DEAD_LETTERS, [], 500),
+      safeQueryMany(runtime, TABLE_NAMES.WORKFLOW_STEP_EVENTS, [], 500),
+      safeQueryMany(runtime, TABLE_NAMES.CIRCUIT_BREAKER_STATE, [], 500),
+      safeQueryMany(runtime, TABLE_NAMES.FEATURE_FLAGS, [], 500)
     ]);
 
     return reply.code(200).send({
@@ -174,32 +193,42 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
       checks: readiness.checks,
       whatsapp: waPerformance,
       counts: {
-        apiEvents: apiEvents.length,
-        webhookEvents: webhookEvents.length,
-        deadLetters: deadLetters.length,
-        workflowEvents: workflows.length,
-        circuitBreakers: circuits.length,
-        featureFlags: flags.length
-      }
+        apiEvents: apiEvents.rows.length,
+        webhookEvents: webhookEvents.rows.length,
+        deadLetters: deadLetters.rows.length,
+        workflowEvents: workflows.rows.length,
+        circuitBreakers: circuits.rows.length,
+        featureFlags: flags.rows.length
+      },
+      errors: [
+        apiEvents.error,
+        webhookEvents.error,
+        deadLetters.error,
+        workflows.error,
+        circuits.error,
+        flags.error
+      ].filter(Boolean)
     });
   });
 
   app.get("/api/admin/logs/api", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery & { route?: string; level?: string };
-    const rows = await runtime.store.queryMany<Record<string, unknown>>(TABLE_NAMES.API_EVENT_LOG, [], 1000);
+    const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.API_EVENT_LOG, [], 1000);
+    const rows = result.rows;
     const filtered = rows.filter((row) => {
       if (query.route && String(row["route"] ?? "") !== query.route) return false;
       if (query.level && String(row["level"] ?? "") !== query.level) return false;
       return true;
     });
-    return reply.code(200).send(applyCursor(filtered, query));
+    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
   });
 
   app.get("/api/admin/logs/webhooks", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery & { status?: string };
-    const rows = await runtime.store.queryMany<Record<string, unknown>>(TABLE_NAMES.WEBHOOK_EVENT_LOG, [], 1000);
+    const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.WEBHOOK_EVENT_LOG, [], 1000);
+    const rows = result.rows;
     const filtered = rows.filter((row) => !query.status || String(row["status"] ?? "") === query.status);
-    return reply.code(200).send(applyCursor(filtered, query));
+    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
   });
 
   app.get("/api/admin/whatsapp/templates", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -243,14 +272,15 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
 
   app.get("/api/admin/whatsapp/campaigns", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery & { status?: string };
-    const rows = await runtime.store.queryMany<CampaignRow>(TABLE_NAMES.WA_CAMPAIGNS, [], 1000);
+    const result = await safeQueryMany<CampaignRow>(runtime, TABLE_NAMES.WA_CAMPAIGNS, [], 1000);
+    const rows = result.rows;
     const shaped = rows.map((row) => ({
       ...row,
       payload: JSON.parse(row.payloadJson ?? "{}") as Record<string, string>,
       audience: JSON.parse(row.audienceJson ?? "[]") as string[]
     }));
     const filtered = shaped.filter((row) => !query.status || row.status === query.status);
-    return reply.code(200).send(applyCursor(filtered, query));
+    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
   });
 
   app.post("/api/admin/whatsapp/campaigns", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -337,9 +367,10 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
 
   app.get("/api/admin/ops/dead-letters", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery & { scope?: string };
-    const rows = await runtime.store.queryMany<DeadLetterRow>(TABLE_NAMES.DEAD_LETTERS, [], 1000);
+    const result = await safeQueryMany<DeadLetterRow>(runtime, TABLE_NAMES.DEAD_LETTERS, [], 1000);
+    const rows = result.rows;
     const filtered = rows.filter((row) => !query.scope || row.scope === query.scope);
-    return reply.code(200).send(applyCursor(filtered, query));
+    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
   });
 
   app.post("/api/admin/ops/dead-letters/:deadLetterId/replay", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -380,19 +411,20 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
 
   app.get("/api/admin/ops/workflows", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery & { runId?: string; state?: string };
-    const rows = await runtime.store.queryMany<Record<string, unknown>>(TABLE_NAMES.WORKFLOW_STEP_EVENTS, [], 1000);
+    const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.WORKFLOW_STEP_EVENTS, [], 1000);
+    const rows = result.rows;
     const filtered = rows.filter((row) => {
       if (query.runId && String(row["workflowRunId"] ?? "") !== query.runId) return false;
       if (query.state && String(row["state"] ?? "") !== query.state) return false;
       return true;
     });
-    return reply.code(200).send(applyCursor(filtered, query));
+    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
   });
 
   app.get("/api/admin/ops/circuit-breakers", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery;
-    const rows = await runtime.store.queryMany<CircuitRow>(TABLE_NAMES.CIRCUIT_BREAKER_STATE, [], 1000);
-    return reply.code(200).send(applyCursor(rows, query));
+    const result = await safeQueryMany<CircuitRow>(runtime, TABLE_NAMES.CIRCUIT_BREAKER_STATE, [], 1000);
+    return reply.code(200).send({ ...applyCursor(result.rows, query), ...(result.error ? { error: result.error } : {}) });
   });
 
   app.post("/api/admin/ops/circuit-breakers/:circuit/reset", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -429,8 +461,8 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
 
   app.get("/api/admin/ops/feature-flags", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery;
-    const rows = await runtime.store.queryMany<FeatureFlagRow>(TABLE_NAMES.FEATURE_FLAGS, [], 1000);
-    return reply.code(200).send(applyCursor(rows, query));
+    const result = await safeQueryMany<FeatureFlagRow>(runtime, TABLE_NAMES.FEATURE_FLAGS, [], 1000);
+    return reply.code(200).send({ ...applyCursor(result.rows, query), ...(result.error ? { error: result.error } : {}) });
   });
 
   app.post("/api/admin/ops/feature-flags/:key/toggle", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -468,8 +500,8 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
 
   app.get("/api/admin/actions/audit", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery;
-    const rows = await runtime.store.queryMany<Record<string, unknown>>(TABLE_NAMES.ADMIN_ACTION_AUDIT, [], 1000);
-    return reply.code(200).send(applyCursor(rows, query));
+    const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.ADMIN_ACTION_AUDIT, [], 1000);
+    return reply.code(200).send({ ...applyCursor(result.rows, query), ...(result.error ? { error: result.error } : {}) });
   });
 
   app.post("/api/admin/actions/execute", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
