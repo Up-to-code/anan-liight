@@ -70,7 +70,8 @@ const envSchema = z.object({
   FEATURE_AUTH_COGNITO_ENABLED: envBoolean(false),
   FEATURE_AUTH_ANON_CHAT_ENABLED: envBoolean(true),
   FEATURE_TEXT_CONTRACT_ENFORCED: envBoolean(false),
-  FEATURE_TEXT_CONTRACT_SHADOW: envBoolean(true)
+  FEATURE_TEXT_CONTRACT_SHADOW: envBoolean(true),
+  FEATURE_ADMIN_DESTRUCTIVE_ACTIONS: envBoolean(false)
 }).superRefine((value, context) => {
   const isProduction = value.NODE_ENV === "production";
   const insecureVerifyTokens = new Set(["apptest", "test", "changeme", "default", "123456"]);

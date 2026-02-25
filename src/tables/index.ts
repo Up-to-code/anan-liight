@@ -1,4 +1,5 @@
 import { AGENTS_TABLE } from "@tables/agents.table";
+import { ADMIN_OPS_TABLES } from "@tables/admin-ops.table";
 import { AUTH_TABLES } from "@tables/auth.table";
 import { CHAT_MESSAGES_TABLE } from "@tables/chat.table";
 import { ERRORS_TABLE } from "@tables/errors.table";
@@ -24,5 +25,6 @@ export const CORE_TABLE_DEFINITIONS: TableDefinition[] = [
   OUTBOX_TABLE,
   ...PARITY_CORE_TABLES,
   ...WHATSAPP_PLATFORM_TABLES,
+  ...ADMIN_OPS_TABLES,
   ...SYSTEM_TABLES
 ];
