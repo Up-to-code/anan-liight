@@ -1,39 +1,101 @@
-import { useCallback, useState } from "react";
+import { useMemo, useState } from "react";
 import { fetchJson } from "../api";
 import { useDashboardContext } from "../context";
-import { usePolling } from "../usePolling";
+import { usePollingQuery } from "../usePollingQuery";
 import { PageShell } from "../components/PageShell";
-import { JsonCard } from "../components/JsonCard";
+import { Panel } from "../components/Panel";
+import { DataTable } from "../components/DataTable";
+import { StatusPill } from "../components/StatusPill";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { ConfirmActionModal } from "../components/ConfirmActionModal";
+import { formatTime } from "../format";
+
+interface CircuitRow {
+  circuit: string;
+  failures: number;
+  status?: string;
+  openedAt?: number;
+  updatedAt?: number;
+}
+
+interface CircuitResponse {
+  rows: CircuitRow[];
+  nextCursor?: string;
+  error?: string;
+}
 
 export function CircuitBreakersPage() {
   const { csrfToken } = useDashboardContext();
-  const [data, setData] = useState<unknown>({});
-  const [circuit, setCircuit] = useState("");
+  const [target, setTarget] = useState("");
   const [reason, setReason] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
-  const load = useCallback(async () => {
-    const result = await fetchJson<unknown>("/api/admin/ops/circuit-breakers");
-    setData(result);
-  }, []);
+  const query = usePollingQuery<CircuitResponse>(() => fetchJson("/api/admin/ops/circuit-breakers?limit=120"));
+  const rows = useMemo(() => query.data?.rows ?? [], [query.data]);
 
-  usePolling(load);
+  const resetCircuit = async () => {
+    setBusy(true);
+    try {
+      await fetchJson(`/api/admin/ops/circuit-breakers/${encodeURIComponent(target)}/reset`, {
+        method: "POST",
+        csrf: csrfToken,
+        body: { reason, confirmation }
+      });
+      setError("");
+      setOpen(false);
+      setReason("");
+      setConfirmation("");
+      await query.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Circuit reset failed");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
-    <PageShell title="Circuit Breakers" subtitle="Inspect and reset circuit state">
-      <JsonCard title="Reset Breaker (Destructive)">
+    <PageShell title="Circuit Breakers" subtitle="Inspect model failure counters and reset breakers safely">
+      {error ? <ErrorBanner message={error} /> : null}
+      {query.error ? <ErrorBanner message={query.error} /> : null}
+      {query.data?.error ? <ErrorBanner message={query.data.error} /> : null}
+
+      <Panel title="Reset Circuit" subtitle="Destructive action with confirmation">
         <div className="inline-actions">
-          <input value={circuit} onChange={(e) => setCircuit(e.target.value)} placeholder="circuit model" />
-          <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="reason" />
-          <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder="type CONFIRM" />
-          <button onClick={() => fetchJson(`/api/admin/ops/circuit-breakers/${encodeURIComponent(circuit)}/reset`, {
-            method: "POST",
-            csrf: csrfToken,
-            body: { reason, confirmation }
-          }).then(load)}>Reset</button>
+          <input value={target} onChange={(event) => setTarget(event.target.value)} placeholder="circuit model name" />
+          <button onClick={() => setOpen(true)}>Open reset modal</button>
         </div>
-      </JsonCard>
-      <JsonCard title="Circuit State" data={data} />
+      </Panel>
+
+      <Panel title="Circuit State" subtitle={`Rows: ${rows.length}`}>
+        <DataTable
+          rows={rows}
+          emptyText="No circuit breaker rows found"
+          columns={[
+            { key: "circuit", header: "Circuit", sortable: true, value: (r) => <span className="code">{r.circuit}</span> },
+            { key: "failures", header: "Failures", sortable: true, sortValue: (r) => r.failures, value: (r) => r.failures },
+            { key: "status", header: "Status", sortable: true, value: (r) => <StatusPill value={r.status ?? "unknown"} /> },
+            { key: "openedAt", header: "Opened", sortable: true, sortValue: (r) => r.openedAt ?? 0, value: (r) => formatTime(r.openedAt) },
+            { key: "updatedAt", header: "Updated", sortable: true, sortValue: (r) => r.updatedAt ?? 0, value: (r) => formatTime(r.updatedAt) }
+          ]}
+        />
+      </Panel>
+
+      <ConfirmActionModal
+        open={open}
+        title="Reset Circuit Breaker"
+        reason={reason}
+        confirmation={confirmation}
+        onReasonChange={setReason}
+        onConfirmationChange={setConfirmation}
+        onCancel={() => setOpen(false)}
+        onConfirm={() => void resetCircuit()}
+        busy={busy}
+      >
+        <p>Target circuit: <strong>{target || "(none)"}</strong></p>
+      </ConfirmActionModal>
     </PageShell>
   );
 }

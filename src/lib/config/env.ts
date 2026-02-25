@@ -24,6 +24,7 @@ const envSchema = z.object({
   SPACETIMEDB_WS_URL: z.string().url(),
   SPACETIMEDB_DB_NAME: z.string().min(1),
   SPACETIMEDB_AUTH_TOKEN: z.string().optional(),
+  SPACETIME_STORE_MODE: z.enum(["http", "cli"]).default("http"),
   WHATSAPP_PHONE_NUMBER_ID: z.string().default(""),
   WHATSAPP_ACCESS_TOKEN: z.string().default(""),
   WHATSAPP_VERIFY_TOKEN: z.string().default(""),

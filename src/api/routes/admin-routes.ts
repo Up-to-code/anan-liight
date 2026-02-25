@@ -14,6 +14,16 @@ interface CursorQuery {
   limit?: string;
 }
 
+interface TemplateRow {
+  templateId: string;
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface CampaignRow {
   id: string;
   version: number;
@@ -100,6 +110,20 @@ function applyCursor<T extends { createdAt?: number; updatedAt?: number }>(rows:
   return {
     rows: page,
     ...(tail ? { nextCursor: String(tail.createdAt ?? tail.updatedAt ?? 0) } : {})
+  };
+}
+
+function buildPage<T extends { createdAt?: number; updatedAt?: number }>(
+  rows: T[],
+  query: CursorQuery,
+  error?: string
+): { rows: T[]; nextCursor: string | null; totalApprox: number; error?: string } {
+  const paged = applyCursor(rows, query);
+  return {
+    rows: paged.rows,
+    nextCursor: paged.nextCursor ?? null,
+    totalApprox: rows.length,
+    ...(error ? { error } : {})
   };
 }
 
@@ -191,6 +215,11 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
       service: "anan-liight",
       ready: readiness.ready,
       checks: readiness.checks,
+      health: {
+        store: readiness.checks.store,
+        queue: readiness.checks.queue,
+        ready: readiness.ready
+      },
       whatsapp: waPerformance,
       counts: {
         apiEvents: apiEvents.rows.length,
@@ -207,7 +236,14 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
         workflows.error,
         circuits.error,
         flags.error
-      ].filter(Boolean)
+      ].filter(Boolean),
+      alerts: [
+        ...((waPerformance.failed > 0) ? ["WHATSAPP_FAILURES_PRESENT"] : []),
+        ...((apiEvents.error || webhookEvents.error || deadLetters.error || workflows.error || circuits.error || flags.error)
+          ? ["STORE_QUERY_ERRORS_PRESENT"]
+          : []),
+        ...(readiness.ready ? [] : ["READINESS_DEGRADED"])
+      ]
     });
   });
 
@@ -220,7 +256,7 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
       if (query.level && String(row["level"] ?? "") !== query.level) return false;
       return true;
     });
-    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
+    return reply.code(200).send(buildPage(filtered, query, result.error));
   });
 
   app.get("/api/admin/logs/webhooks", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -228,13 +264,26 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
     const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.WEBHOOK_EVENT_LOG, [], 1000);
     const rows = result.rows;
     const filtered = rows.filter((row) => !query.status || String(row["status"] ?? "") === query.status);
-    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
+    return reply.code(200).send(buildPage(filtered, query, result.error));
   });
 
   app.get("/api/admin/whatsapp/templates", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
-    const query = request.query as { locale?: string };
-    const templates = await fetchTemplateCatalog(runtime, query.locale);
-    return reply.code(200).send({ templates });
+    const query = request.query as CursorQuery & { locale?: string };
+    try {
+      const templates = await fetchTemplateCatalog(runtime, query.locale);
+      const rows: TemplateRow[] = templates.map((template) => ({
+        templateId: template.templateId,
+        name: template.name,
+        language: template.language,
+        category: template.category,
+        status: template.status,
+        createdAt: template.createdAt,
+        updatedAt: template.updatedAt
+      }));
+      return reply.code(200).send(buildPage(rows, query));
+    } catch (error) {
+      return reply.code(200).send(buildPage<TemplateRow>([], query, error instanceof Error ? error.message : "templates_query_failed"));
+    }
   });
 
   app.post("/api/admin/whatsapp/templates", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -280,7 +329,7 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
       audience: JSON.parse(row.audienceJson ?? "[]") as string[]
     }));
     const filtered = shaped.filter((row) => !query.status || row.status === query.status);
-    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
+    return reply.code(200).send(buildPage(filtered, query, result.error));
   });
 
   app.post("/api/admin/whatsapp/campaigns", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -370,7 +419,7 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
     const result = await safeQueryMany<DeadLetterRow>(runtime, TABLE_NAMES.DEAD_LETTERS, [], 1000);
     const rows = result.rows;
     const filtered = rows.filter((row) => !query.scope || row.scope === query.scope);
-    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
+    return reply.code(200).send(buildPage(filtered, query, result.error));
   });
 
   app.post("/api/admin/ops/dead-letters/:deadLetterId/replay", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -418,13 +467,13 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
       if (query.state && String(row["state"] ?? "") !== query.state) return false;
       return true;
     });
-    return reply.code(200).send({ ...applyCursor(filtered, query), ...(result.error ? { error: result.error } : {}) });
+    return reply.code(200).send(buildPage(filtered, query, result.error));
   });
 
   app.get("/api/admin/ops/circuit-breakers", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery;
     const result = await safeQueryMany<CircuitRow>(runtime, TABLE_NAMES.CIRCUIT_BREAKER_STATE, [], 1000);
-    return reply.code(200).send({ ...applyCursor(result.rows, query), ...(result.error ? { error: result.error } : {}) });
+    return reply.code(200).send(buildPage(result.rows, query, result.error));
   });
 
   app.post("/api/admin/ops/circuit-breakers/:circuit/reset", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -462,7 +511,7 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
   app.get("/api/admin/ops/feature-flags", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery;
     const result = await safeQueryMany<FeatureFlagRow>(runtime, TABLE_NAMES.FEATURE_FLAGS, [], 1000);
-    return reply.code(200).send({ ...applyCursor(result.rows, query), ...(result.error ? { error: result.error } : {}) });
+    return reply.code(200).send(buildPage(result.rows, query, result.error));
   });
 
   app.post("/api/admin/ops/feature-flags/:key/toggle", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
@@ -501,7 +550,7 @@ export async function registerAdminRoutes(app: FastifyInstance, runtime: Runtime
   app.get("/api/admin/actions/audit", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as CursorQuery;
     const result = await safeQueryMany<Record<string, unknown>>(runtime, TABLE_NAMES.ADMIN_ACTION_AUDIT, [], 1000);
-    return reply.code(200).send({ ...applyCursor(result.rows, query), ...(result.error ? { error: result.error } : {}) });
+    return reply.code(200).send(buildPage(result.rows, query, result.error));
   });
 
   app.post("/api/admin/actions/execute", { preHandler: requireAdmin(runtime) }, async (request: FastifyRequest, reply: FastifyReply) => {
